@@ -10,7 +10,7 @@
 
 //using 0x80000000 introduces "negative" numbers which r a pain in the ass!
 #define ADD_TO_AGE 0x40000000
-#define DEBUG 0
+#define DEBUG 1
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
@@ -23,6 +23,65 @@ extern void forkret(void);
 extern void trapret(void);
 
 static void wakeup1(void *chan);
+
+//custommed
+//  static pte_t *
+//  walkpgdir(pde_t *pgdir, const void *va, int alloc)
+//  {
+//    pde_t *pde;
+//    pte_t *pgtab;
+//    pde = &pgdir[PDX(va)];
+//    if(*pde & PTE_P){
+//      pgtab = (pte_t*)p2v(PTE_ADDR(*pde));
+//    } else {
+//      if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
+//        return 0;
+//      // Make sure all those PTE_P bits are zero.
+//      memset(pgtab, 0, PGSIZE);
+//      // The permissions here are overly generous, but they can
+//      // be further restricted by the permissions in the page table
+//      // entries, if necessary.
+//      *pde = v2p(pgtab) | PTE_P | PTE_W | PTE_U;
+//    }
+//    return &pgtab[PTX(va)];
+//  }
+
+int getPagedOutAmout(struct proc* p){
+ 
+  int i;
+  int amout = 0;
+
+  for (i=0;i < MAX_PSYC_PAGES; i++){
+    if (p->fileCtrlr[i].state == USED)
+      amout++;
+  }
+  return amout;
+}
+
+// void updateAccessCounters(struct proc * p){
+//   pte_t * pte;
+//   int i;
+//   for (i = 0; i < MAX_PSYC_PAGES; i++) {
+//     if (p->ramCtrlr[i].state == USED){
+//       pte = walkpgdir(p->ramCtrlr[i].pgdir, (char*)p->ramCtrlr[i].userPageVAddr,0);
+//       if (*pte & PTE_A) {
+//         *pte &= ~PTE_A; // turn off PTE_A flag
+//          p->ramCtrlr[i].accessCount++;
+//       }
+//     } 
+//   }
+// }
+void updatelru(){
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if (p->pid > 2 && p->state > 1 && p->state < 5) //proc is either running, runnable or sleeping
+      updateAccessCounters(p); //implemented in vm.c
+  }
+  release(&ptable.lock);
+}
+
+//end custommed
 
 
 void
@@ -105,10 +164,21 @@ found:
   }
   sp = p->kstack + KSTACKSIZE;
 
+
+
   // Leave room for trap frame.
+  // sp -= sizeof *p->tf;
+  // p->tf = (struct trapframe*)sp;
+
+ // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
+  p->loadOrderCounter = 0;
+  p->faultCounter = 0;
+  p->countOfPagedOut = 0;
 
+    if(p->pid > 2)
+      createSwapFile(p);
   // Set up new context to start executing at forkret,
   // which returns to trapret.
   sp -= 4;
@@ -219,6 +289,22 @@ fork(void)
   np->pagesinmem = proc->pagesinmem;
   np->pagesinswapfile = proc->pagesinswapfile;
   np->sz = proc->sz;
+
+  //custommed
+if (proc->pid > 2){
+      copySwapFile(proc, np);
+      np->loadOrderCounter = proc->loadOrderCounter;
+      for (i = 0; i < MAX_PSYC_PAGES; i++){
+        np->ramCtrlr[i] = proc->ramCtrlr[i]; //deep copies ramCtrlr list
+        np->ramCtrlr[i].pgdir = np->pgdir;  //replace parent pgdir with child new pgdir
+      }
+      for (i = 0; i < MAX_TOTAL_PAGES-MAX_PSYC_PAGES; i++){
+        np->fileCtrlr[i] = proc->fileCtrlr[i]; //deep copies fileCtrlr list
+        np->fileCtrlr[i].pgdir = np->pgdir;   //replace parent pgdir with child new pgdir
+      }
+    }
+    //end of custommed
+
   np->parent = proc;
   *np->tf = *proc->tf;
 
@@ -231,8 +317,14 @@ fork(void)
   np->cwd = idup(proc->cwd);
 
   safestrcpy(np->name, proc->name, sizeof(proc->name));
-
+//custommed
   pid = np->pid;
+  np->faultCounter = 0;
+  np->countOfPagedOut = 0;
+  //end of custommed
+
+
+  //pid = np->pid;
 
   // // initialize process's page data
   // for (i = 0; i < MAX_TOTAL_PAGES; i++) {
@@ -280,14 +372,14 @@ fork(void)
   }
 
   for (i = 0; i < MAX_PSYC_PAGES; i++) 
-    for (j = 0; j < MAX_PSYC_PAGES; ++j)
+    for (j = 0; j < MAX_PSYC_PAGES; ++j){
       if(np->freepages[j].va == proc->freepages[i].next->va)
         np->freepages[i].next = &np->freepages[j];
       if(np->freepages[j].va == proc->freepages[i].prev->va)
         np->freepages[i].prev = &np->freepages[j];
 
       
-  
+    }
 
 #if FIFO 
   for (i = 0; i < MAX_PSYC_PAGES; i++) {
@@ -329,7 +421,7 @@ printProcMemPageInfo(struct proc *proc){
   [SLEEPING]  "sleeping",
   [RUNNABLE]  "runnable",
   [RUNNING]   "running",
-  [ZOMBIE]    "zombie"
+  [ZOMBIE]    "zombie",
   };
   int i;
   char *state;
@@ -349,7 +441,6 @@ printProcMemPageInfo(struct proc *proc){
   cprintf("No. of pages currently paged out: %d,\n", proc->pagesinswapfile);
   cprintf("Total No. of page faults: %d,\n", proc->totalPageFaultCount);
   cprintf("Total number of paged out pages: %d,\n\n", proc->totalPagedOutCount);
-
   // regular xv6 procdump printing
   if(proc->state == SLEEPING){
     getcallerpcs((uint*)proc->context->ebp+2, pc);
@@ -457,6 +548,14 @@ wait(void)
         freevm(p->pgdir);
         p->state = UNUSED;
         p->pid = 0;
+        //custommed
+         int i;
+        for (i = 0; i < MAX_PSYC_PAGES; i++)
+          p->ramCtrlr[i].state = NOTUSED;
+        for (i = 0; i < MAX_TOTAL_PAGES-MAX_PSYC_PAGES; i++)
+          p->fileCtrlr[i].state = NOTUSED;
+          //end of custommed
+
         p->parent = 0;
         p->name[0] = 0;
         p->killed = 0;
@@ -664,11 +763,28 @@ procdump(void)
 {
   int percent;
   struct proc *p;
+    //customed
+  static char *states[] = {
+  [UNUSED]    "unused",
+  [EMBRYO]    "embryo",
+  [SLEEPING]  "sleep ",
+  [RUNNABLE]  "runble",
+  [RUNNING]   "run   ",
+  [ZOMBIE]    "zombie"
+  };
+  int i;
+  char *state;
+  uint pc[10];
+  int allocatedPages;
+  int pagedOutAmount;
+//end of custommed
 
   // cprintf("cr2:%p\n", rcr2());
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-    if(p->state == UNUSED)
+    
+    if(p->state == UNUSED )
       continue;
+
     printProcMemPageInfo(p);
   }
 
@@ -676,4 +792,30 @@ procdump(void)
   percent = physPagesCounts.currentFreePagesNo * 100 / physPagesCounts.initPagesNo;
   cprintf("\n\nPercent of free physical pages: %d/%d ~ 0.%d%% \n",  physPagesCounts.currentFreePagesNo,
                                                                     physPagesCounts.initPagesNo , percent);
+
+  //start of custommed
+
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state == UNUSED)
+      continue;
+    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
+      state = states[p->state];
+    else
+      state = "???";
+
+    allocatedPages = PGROUNDUP(p->sz)/PGSIZE;
+    pagedOutAmount = getPagedOutAmout(p);
+    cprintf("%d %s %d %d %d %d %s", p->pid, state, allocatedPages, 
+           pagedOutAmount,p->faultCounter , p->countOfPagedOut ,p->name);
+    
+    if(p->state == SLEEPING){
+      getcallerpcs((uint*)p->context->ebp+2, pc);
+      for(i=0; i<10 && pc[i] != 0; i++)
+        cprintf(" %p", pc[i]);
+    }
+
+    cprintf("\n");
+  }
+  cprintf("%d/%d free pages in the system\n",getFreePages(),getTotalPages());
+//end of custommmed
 }

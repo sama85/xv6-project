@@ -10,9 +10,14 @@
 #include "spinlock.h"
 #include "kalloc.h"
 
+extern char end[];
+static int freePages = 0;
+
+
 struct physPagesCounts physPagesCounts;
 
 void freerange(void *vstart, void *vend);
+
 extern char end[]; // first address after kernel loaded from ELF file
 
 struct run {
@@ -59,6 +64,17 @@ kinit2(void *vstart, void *vend)
 
   kmem.use_lock = 1;
 }
+
+//start of custommed
+int getFreePages(){
+  return freePages;
+}
+
+int getTotalPages(){
+  return PGROUNDDOWN(PHYSTOP-v2p(end))/PGSIZE;
+}
+//end of custommed
+
 
 void
 freerange(void *vstart, void *vend)

@@ -46,7 +46,78 @@ bzero(int dev, int bno)
   log_write(bp);
   brelse(bp);
 }
+//start of custommed
+int readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size){
+  p->swapFile->off = placeOnFile;
+  return fileread(p->swapFile, buffer,  size);
+}
 
+//return as sys_write (-1 when error)
+int writeToSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size){
+  p->swapFile->off = placeOnFile;
+  return filewrite(p->swapFile, buffer, size);
+}
+
+int getFreeSlot(struct proc * p) {
+  int maxStructCount = (MAX_TOTAL_PAGES - MAX_PSYC_PAGES);
+  int i;
+  for (i = 0; i < maxStructCount; i++) {
+    if (p->fileCtrlr[i].state == NOTUSED)
+      return i;
+  }
+  return -1; //file is full
+}
+
+int writePageToFile(struct proc * p, int userPageVAddr, pde_t *pgdir) {
+  int freePlace = getFreeSlot(p);
+  int retInt = writeToSwapFile(p, (char*)userPageVAddr, PGSIZE*freePlace, PGSIZE);
+  if (retInt == -1)
+    return -1;
+  //if reached here - data was successfully placed in file
+  p->fileCtrlr[freePlace].state = USED;
+  p->fileCtrlr[freePlace].userPageVAddr = userPageVAddr;
+  p->fileCtrlr[freePlace].pgdir = pgdir;
+  p->fileCtrlr[freePlace].accessCount = 0;
+  p->fileCtrlr[freePlace].loadOrder = 0;
+  return retInt;
+}
+
+int readPageFromFile(struct proc * p, int ramCtrlrIndex, int userPageVAddr, char* buff) {
+  int maxStructCount = (MAX_TOTAL_PAGES - MAX_PSYC_PAGES);
+  int i;
+  int retInt;
+  for (i = 0; i < maxStructCount; i++) {
+    if (p->fileCtrlr[i].userPageVAddr == userPageVAddr) {
+      retInt = readFromSwapFile(p, buff, i*PGSIZE, PGSIZE);
+      if (retInt == -1)
+        break; //error in read
+      p->ramCtrlr[ramCtrlrIndex] = p->fileCtrlr[i];
+      p->ramCtrlr[ramCtrlrIndex].loadOrder = proc->loadOrderCounter++;
+      p->fileCtrlr[i].state = NOTUSED;
+      return retInt;
+    }
+  }
+  //if reached here - physical address given is not paged out (not found)
+  return -1;
+}
+
+
+void copySwapFile(struct proc* fromP, struct proc* toP){
+  if (fromP->pid < 3)
+    return;
+  char buff[PGSIZE];
+  int i;
+  for (i = 0; i < MAX_TOTAL_PAGES-MAX_PSYC_PAGES; i++){
+    if (proc->fileCtrlr[i].state == USED){
+      if (readFromSwapFile(fromP, buff, PGSIZE*i, PGSIZE) != PGSIZE)
+        panic("CopySwapFile error");
+      if (writeToSwapFile(toP, buff, PGSIZE*i, PGSIZE) != PGSIZE)
+        panic("CopySwapFile error");
+    }
+  }
+}
+
+//end of custommed
 // Blocks.
 
 // Allocate a zeroed disk block.
@@ -768,20 +839,20 @@ createSwapFile(struct proc* p)
 }
 
 //return as sys_write (-1 when error)
-int
-writeToSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
-{
-	p->swapFile->off = placeOnFile;
-  // cprintf("writeToSwapFile: buffer:0x%x placeOnFile:%x size:%d\n", buffer, placeOnFile, size);//TODO delete
-	return filewrite(p->swapFile, buffer, size);
+// int
+// writeToSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
+// {
+// 	p->swapFile->off = placeOnFile;
+//   // cprintf("writeToSwapFile: buffer:0x%x placeOnFile:%x size:%d\n", buffer, placeOnFile, size);//TODO delete
+// 	return filewrite(p->swapFile, buffer, size);
 
-}
+// }
 
-//return as sys_read (-1 when error)
-int
-readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
-{
-	p->swapFile->off = placeOnFile;
-  // cprintf("readFromSwapFile: buffer:0x%x placeOnFile:%x size:%d\n", buffer, placeOnFile, size);//TODO delete
-	return fileread(p->swapFile, buffer,  size);
-}
+// //return as sys_read (-1 when error)
+// int
+// readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size)
+// {
+// 	p->swapFile->off = placeOnFile;
+//   // cprintf("readFromSwapFile: buffer:0x%x placeOnFile:%x size:%d\n", buffer, placeOnFile, size);//TODO delete
+// 	return fileread(p->swapFile, buffer,  size);
+// }

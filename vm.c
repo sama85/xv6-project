@@ -11,7 +11,7 @@
 #define MAX_POSSIBLE ~0x80000000
 //using 0x80000000 introduces "negative" numbers which r a pain in the ass!
 #define ADD_TO_AGE 0x40000000
-#define DEBUG 0
+#define DEBUG 1
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
@@ -20,6 +20,30 @@ struct segdesc gdt[NSEGS];
 int deallocCount = 0;
 // Set up CPU's kernel segment descriptors.
 // Run once on entry on each CPU.
+
+//custommed
+
+ static pte_t *
+ walkpgdir(pde_t *pgdir, const void *va, int alloc)
+ {
+   pde_t *pde;
+   pte_t *pgtab;
+   pde = &pgdir[PDX(va)];
+   if(*pde & PTE_P){
+     pgtab = (pte_t*)p2v(PTE_ADDR(*pde));
+   } else {
+     if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
+       return 0;
+     // Make sure all those PTE_P bits are zero.
+     memset(pgtab, 0, PGSIZE);
+     // The permissions here are overly generous, but they can
+     // be further restricted by the permissions in the page table
+     // entries, if necessary.
+     *pde = v2p(pgtab) | PTE_P | PTE_W | PTE_U;
+   }
+   return &pgtab[PTX(va)];
+ }
+ //end of custommed
 void
 seginit(void)
 {
@@ -49,27 +73,27 @@ seginit(void)
 // Return the address of the PTE in page table pgdir
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page table pages.
-static pte_t *
-walkpgdir(pde_t *pgdir, const void *va, int alloc)
-{
-  pde_t *pde;
-  pte_t *pgtab;
+// static pte_t *
+// walkpgdir(pde_t *pgdir, const void *va, int alloc)
+// {
+//   pde_t *pde;
+//   pte_t *pgtab;
 
-  pde = &pgdir[PDX(va)];
-  if(*pde & PTE_P){
-    pgtab = (pte_t*)p2v(PTE_ADDR(*pde));
-  } else {
-    if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
-      return 0;
-    // Make sure all those PTE_P bits are zero.
-    memset(pgtab, 0, PGSIZE);
-    // The permissions here are overly generous, but they can
-    // be further restricted by the permissions in the page table
-    // entries, if necessary.
-    *pde = v2p(pgtab) | PTE_P | PTE_W | PTE_U;
-  }
-  return &pgtab[PTX(va)];
-}
+//   pde = &pgdir[PDX(va)];
+//   if(*pde & PTE_P){
+//     pgtab = (pte_t*)p2v(PTE_ADDR(*pde));
+//   } else {
+//     if(!alloc || (pgtab = (pte_t*)kalloc()) == 0)
+//       return 0;
+//     // Make sure all those PTE_P bits are zero.
+//     memset(pgtab, 0, PGSIZE);
+//     // The permissions here are overly generous, but they can
+//     // be further restricted by the permissions in the page table
+//     // entries, if necessary.
+//     *pde = v2p(pgtab) | PTE_P | PTE_W | PTE_U;
+//   }
+//   return &pgtab[PTX(va)];
+// }
 
 void
 checkProcAccBit(){
@@ -240,6 +264,9 @@ loaduvm(pde_t *pgdir, char *addr, struct inode *ip, uint offset, uint sz)
 }
 
 void fifoRecord(char *va){
+  //cprintf("code in fifo record function in vm.c worked");
+
+
   int i;
   //TODO delete cprintf("rnp pid:%d count:%d va:0x%x\n", proc->pid, proc->pagesinmem, va);
   for (i = 0; i < MAX_PSYC_PAGES; i++)
@@ -298,6 +325,10 @@ void recordNewPage(char *va) {
   //TODO cprintf("recordNewPage: %s is calling scRecord with: 0x%x\n", proc->name, va);
   scRecord(va);
 #else
+//custommed
+#if LRU
+   nfuRecord(va);
+#endif
 
 #if NFU
   nfuRecord(va);
@@ -310,6 +341,7 @@ void recordNewPage(char *va) {
 }
 
 struct freepg *fifoWrite() {
+ // cprintf("code in fifo write function in vm.c worked");
   int i;
   struct freepg *link, *l;
   for (i = 0; i < MAX_PSYC_PAGES; i++){
@@ -517,9 +549,231 @@ struct freepg *writePageToSwapFile(char* va) {
 
 // Allocate page tables and physical memory to grow process from oldsz to
 // newsz, which need not be page aligned.  Returns new size or 0 on error.
+
+
+
+
+
+//start of custommed
+
+int getPagePAddr(int userPageVAddr, pde_t * pgdir){
+  pte_t *pte;
+  pte = walkpgdir(pgdir, (int*)userPageVAddr, 0);
+  if(!pte) //uninitialized page table
+    return -1;
+  return PTE_ADDR(*pte);
+}
+
+void fixPagedOutPTE(int userPageVAddr, pde_t * pgdir){
+  pte_t *pte;
+  pte = walkpgdir(pgdir, (int*)userPageVAddr, 0);
+  if (!pte)
+    panic("PTE of swapped page is missing");
+  *pte |= PTE_PG;
+  *pte &= ~PTE_P;
+  *pte &= PTE_FLAGS(*pte); //clear junk physical address
+  lcr3(v2p(proc->pgdir)); //refresh CR3 register
+}
+
+//This method cannot be replaced with mappages because mappages cannot turn off PTE_PG bit
+void fixPagedInPTE(int userPageVAddr, int pagePAddr, pde_t * pgdir){
+  pte_t *pte;
+  pte = walkpgdir(pgdir, (int*)userPageVAddr, 0);
+  if (!pte)
+    panic("PTE of swapped page is missing");
+  if (*pte & PTE_P)
+  	panic("PAGE IN REMAP!");
+  *pte |= PTE_P | PTE_W | PTE_U;      //Turn on needed bits
+  *pte &= ~PTE_PG;    								//Turn off inFile bit
+  *pte |= pagePAddr;  								//Map PTE to the new Page
+  lcr3(v2p(proc->pgdir)); //refresh CR3 register
+}
+
+int pageIsInFile(int userPageVAddr, pde_t * pgdir) {
+  pte_t *pte;
+  pte = walkpgdir(pgdir, (char *)userPageVAddr, 0);
+  return (*pte & PTE_PG); //PAGE IS IN FILE
+}
+
+int getLRU(){
+  int i; 
+  int pageIndex = -1;
+  uint minAccess = 0xffffffff;
+
+  for (i = 0; i < MAX_PSYC_PAGES; i++) {
+    if (proc->ramCtrlr[i].state == USED && proc->ramCtrlr[i].accessCount <= minAccess) {
+          minAccess = proc->ramCtrlr[i].accessCount;
+          pageIndex = i;          
+    }
+  }
+  return pageIndex;
+}
+
+int getPageOutIndex(){
+  #if LRU
+    return getLRU();
+  #endif
+  panic("Unrecognized paging machanism");
+}
+
+ void updateAccessCounters(struct proc * p){
+   pte_t * pte;
+   int i;
+   for (i = 0; i < MAX_PSYC_PAGES; i++) {
+     if (p->ramCtrlr[i].state == USED){
+       pte = walkpgdir(p->ramCtrlr[i].pgdir, (char*)p->ramCtrlr[i].userPageVAddr,0);
+       if (*pte & PTE_A) {
+         *pte &= ~PTE_A; // turn off PTE_A flag
+          p->ramCtrlr[i].accessCount++;
+       }
+     } 
+   }
+ }
+
+int getFreeRamCtrlrIndex() {
+  if (proc == 0)
+    return -1;
+  int i;
+  for (i = 0; i < MAX_PSYC_PAGES; i++) {
+    if (proc->ramCtrlr[i].state == NOTUSED)
+      return i;
+  }
+  return -1; //NO ROOM IN RAMCTRLR
+}
+
+static char buff[PGSIZE]; //buffer used to store swapped page in getPageFromFile method
+
+int getPageFromFile(int cr2){
+  proc->faultCounter++;
+  int userPageVAddr = PGROUNDDOWN(cr2);
+  char * newPg = kalloc();
+  memset(newPg, 0, PGSIZE);
+  int outIndex = getFreeRamCtrlrIndex();
+  lcr3(v2p(proc->pgdir)); //refresh CR3 register
+  if (outIndex >= 0) { //Free location in RamCtrlr is available, no need for swapping
+    fixPagedInPTE(userPageVAddr, v2p(newPg), proc->pgdir);
+    readPageFromFile(proc, outIndex, userPageVAddr, (char*)userPageVAddr);
+    return 1; //Operation was successful
+  }
+  proc->countOfPagedOut++;
+  //If reached here - Swapping is needed.
+  outIndex = getPageOutIndex(); //select a page to swap to file
+  struct pagecontroller outPage = proc->ramCtrlr[outIndex];
+  fixPagedInPTE(userPageVAddr, v2p(newPg), proc->pgdir);
+  readPageFromFile(proc, outIndex, userPageVAddr, buff); //automatically adds to ramctrlr
+  int outPagePAddr = getPagePAddr(outPage.userPageVAddr, outPage.pgdir);
+  memmove(newPg, buff, PGSIZE);
+  writePageToFile(proc, outPage.userPageVAddr, outPage.pgdir);
+  fixPagedOutPTE(outPage.userPageVAddr, outPage.pgdir);
+  char *v = p2v(outPagePAddr);
+  kfree(v); //free swapped page
+  return 1;
+}
+
+void addToRamCtrlr(pde_t *pgdir, uint userPageVAddr) {
+  int freeLocation = getFreeRamCtrlrIndex();
+  proc->ramCtrlr[freeLocation].state = USED;
+  proc->ramCtrlr[freeLocation].pgdir = pgdir;
+  proc->ramCtrlr[freeLocation].userPageVAddr = userPageVAddr;
+  proc->ramCtrlr[freeLocation].loadOrder = proc->loadOrderCounter++;
+  proc->ramCtrlr[freeLocation].accessCount = 0;
+}
+
+
+void swap(pde_t *pgdir, uint userPageVAddr){
+  proc->countOfPagedOut++;
+  int outIndex = getPageOutIndex();
+  int outPagePAddr = getPagePAddr(proc->ramCtrlr[outIndex].userPageVAddr, proc->ramCtrlr[outIndex].pgdir);
+  writePageToFile(proc, proc->ramCtrlr[outIndex].userPageVAddr, proc->ramCtrlr[outIndex].pgdir);
+  char *v = p2v(outPagePAddr);
+  kfree(v); //free swapped page
+  proc->ramCtrlr[outIndex].state = NOTUSED;
+  fixPagedOutPTE(proc->ramCtrlr[outIndex].userPageVAddr, proc->ramCtrlr[outIndex].pgdir);
+  addToRamCtrlr(pgdir, userPageVAddr);
+}
+
+
+int isNONEpolicy(){
+	#if NONE
+		return 1;
+	#endif
+	return 0;
+}
+
+void removeFromRamCtrlr(uint userPageVAddr, pde_t *pgdir){
+  if (proc == 0)
+    return;
+  int i;
+  for (i = 0; i < MAX_PSYC_PAGES; i++) {
+    if (proc->ramCtrlr[i].state == USED 
+        && proc->ramCtrlr[i].userPageVAddr == userPageVAddr
+        && proc->ramCtrlr[i].pgdir == pgdir){
+      proc->ramCtrlr[i].state = NOTUSED;
+      return;
+    }
+  }
+}
+
+void removeFromFileCtrlr(uint userPageVAddr, pde_t *pgdir){
+  if (proc == 0)
+    return;
+  int i;
+  for (i = 0; i < MAX_TOTAL_PAGES-MAX_PSYC_PAGES; i++) {
+    if (proc->fileCtrlr[i].state == USED 
+        && proc->fileCtrlr[i].userPageVAddr == userPageVAddr
+        && proc->fileCtrlr[i].pgdir == pgdir){
+      proc->fileCtrlr[i].state = NOTUSED;
+      return;
+    }
+  }
+}
+
+//end of custommed
+
+
+
 int
 allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 {
+  #if LRU
+  char *mem;
+  uint a;
+  if(newsz >= KERNBASE)
+    return 0;
+  if(newsz < oldsz)
+    return oldsz;
+
+  if (!isNONEpolicy()){
+     if (PGROUNDUP(newsz)/PGSIZE > MAX_TOTAL_PAGES && proc->pid > 2) {
+		    cprintf("proc is too big\n", PGROUNDUP(newsz)/PGSIZE);
+		    return 0;
+		  }
+	}
+
+  a = PGROUNDUP(oldsz);
+  int i = 0; //debugging
+  for(; a < newsz; a += PGSIZE){
+    mem = kalloc();
+    i++;
+    if(mem == 0){
+      cprintf("allocuvm out of memory\n");
+      deallocuvm(pgdir, newsz, oldsz);
+      return 0;
+    }
+    memset(mem, 0, PGSIZE);
+    mappages(pgdir, (char*)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
+    if (!isNONEpolicy() && proc->pid > 2){
+      if (PGROUNDUP(oldsz)/PGSIZE + i > MAX_PSYC_PAGES)
+        swap(pgdir, a);
+      else //there's room
+        addToRamCtrlr(pgdir, a);
+	  }
+  }
+  return newsz;
+//end of custom code lru
+
+
+ #else 
   char *mem;
   uint a;
 
@@ -577,6 +831,10 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
     mappages(pgdir, (char*)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
   }
   return newsz;
+ 
+ #endif
+
+   
 }
 
 // Deallocate user pages to bring the process size from oldsz to
@@ -586,8 +844,41 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 int
 deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 {
+  #if LRU
+  //custom repo
+ pte_t *pte;
+  uint a, pa;
+
+  if(newsz >= oldsz)
+    return oldsz;
+
+  a = PGROUNDUP(newsz);
+  int i = 0; //debugging
+  for(; a  < oldsz; a += PGSIZE){
+    pte = walkpgdir(pgdir, (char*)a, 0);
+    if(!pte) //uninitialized page table
+      a += (NPTENTRIES - 1) * PGSIZE; //jump to next page table
+    else if((*pte & PTE_P) != 0){     //page table exists and page is present
+      pa = PTE_ADDR(*pte);            //pa = beginning of page physical address
+      if(pa == 0)
+        panic("kfree");
+      char *v = p2v(pa);
+      kfree(v); //free page
+      if (!isNONEpolicy())
+      	removeFromRamCtrlr(a, pgdir);
+    
+      i++;
+      *pte = 0;
+    }
+  }
+  return newsz;
+
+//end of custom repo
+  #else
+
   pte_t *pte;
   uint a, pa;
+
   int i;
 
   if(newsz >= oldsz)
@@ -657,58 +948,6 @@ doneLooking:
         proc->freepages[i].next = 0;
         proc->freepages[i].prev = 0;
 
-/*
-this messy version is commented out
-
-        if (proc->head == &proc->freepages[i]){
-          cprintf("deallocuvm: deleting head\n");
-          proc->head = proc->freepages[i].next;
-          if(proc->head != 0)
-            proc->head->prev = 0;
-          goto doneLooking;
-        }
-        if (proc->tail == &proc->freepages[i]){
-          cprintf("deallocuvm: deleting tail\n");
-          proc->tail = proc->freepages[i].prev;
-          if(proc->tail != 0)// should allways be true but lets be extra safe...
-            proc->tail->next = 0;
-          goto doneLooking;
-        }
-        struct freepg *l = proc->head;
-        cprintf("deallocuvm: find someone between\n");
-        while (l->next != 0 && l->next != &proc->freepages[i]){
-          cprintf("deallocuvm: l = l->next\n");
-          l = l->next;
-        }
-        if(l->next == 0)
-          cprintf("l->next == 0\n");
-        else
-          cprintf("deallocuvm: found link to delete in the middle\n");
-        l->next = proc->freepages[i].next;
-        if (proc->freepages[i].next != 0){
-          cprintf("proc->freepages[i].next != 0\n");
-          proc->freepages[i].next->prev = l;
-        }
-*/
-        
-/*
-  cprintf("first version\n");
-  if (proc->head == &proc->freepages[i])
-    proc->head = proc->freepages[i].next;
-  if (proc->tail == &proc->freepages[i])
-    proc->tail = proc->freepages[i].prev;
-  else {
-    struct freepg *l = proc->head;
-    while (l->next != &proc->freepages[i])
-      l = l->next;
-      l->next = proc->freepages[i].next;
-      if (proc->freepages[i].next != 0)
-        proc->freepages[i].next->prev = l;
-  }
-  proc->freepages[i].next = 0;
-  proc->freepages[i].prev = 0;
-*/
-//#if NFU
 #elif NFU
         proc->freepages[i].age = 0;
 #endif
@@ -738,6 +977,9 @@ founddeallocuvmPTEPG:
     }
   }
   return newsz;
+
+
+  #endif
 }
 
 // Free a page table and all the physical memory pages
@@ -783,19 +1025,40 @@ copyuvm(pde_t *pgdir, uint sz)
   uint pa, i, flags;
   char *mem;
 
-  if((d = setupkvm()) == 0)
-    return 0;
+  if((d = setupkvm()) == 0){
+    return 0;}
+
+   // int j = 0;
+
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
       panic("copyuvm: pte should exist");
+
+if (*pte & PTE_PG){
+    	fixPagedOutPTE(i, d);
+    	continue;
+    }
+
     if(!(*pte & PTE_P) && !(*pte & PTE_PG))
       panic("copyuvm: page not present");
+
+
+
     if (*pte & PTE_PG) {
+      fixPagedOutPTE(i, d);
       // cprintf("copyuvm PTR_PG\n"); // TODO delete
       pte = walkpgdir(d, (void*) i, 1);
       *pte = PTE_U | PTE_W | PTE_PG;
       continue;
     }
+
+
+
+
+
+    if(!(*pte & PTE_P))
+      panic("copyuvm: page not present");
+
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -855,6 +1118,7 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 }
 
 void fifoSwap(uint addr){
+  
   int i, j;
   char buf[BUF_SIZE];
   pte_t *pte1, *pte2;

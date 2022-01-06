@@ -159,6 +159,10 @@ main(void)
     printf(1, "Paging policy: FIFO\n");
   #endif
 
+  #ifdef LRU
+    printf(1, "Paging policy: LRU\n");
+  #endif
+  
   #ifdef SCFIFO
   printf(1, "Paging policy: SCFIFO\n");
   #endif

@@ -51,10 +51,18 @@ struct inode*   nameiparent(char*, char*);
 int             readi(struct inode*, char*, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, char*, uint, uint);
+
+
 int				createSwapFile(struct proc* p);
 int				readFromSwapFile(struct proc * p, char* buffer, uint placeOnFile, uint size);
 int				writeToSwapFile(struct proc* p, char* buffer, uint placeOnFile, uint size);
 int				removeSwapFile(struct proc* p);
+//custommed
+int 			writePageToFile(struct proc * p, int pageVaddr, pde_t *pgdir);
+int 			readPageFromFile(struct proc * p, int ramCtrlrIndex, int userPageVAddr, char* buff);
+void 			copySwapFile(struct proc* fromP, struct proc* toP);
+//end custommed
+
 // ide.c
 void            ideinit(void);
 void            ideintr(void);
@@ -70,6 +78,10 @@ char*           kalloc(void);
 void            kfree(char*);
 void            kinit1(void*, void*);
 void            kinit2(void*, void*);
+//start of custm
+int 			getFreePages();
+int 			getTotalPages();
+//end of custommed
 
 // kbd.c
 void            kbdintr(void);
@@ -189,6 +201,17 @@ void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
 void            swapPages(uint);
+int 			pageIsInFile(int vAddr, pde_t *pgdir);
+int 			getPageFromFile(int vAddr);
+void			updateAccessCounters(struct proc * p);
+void			printRamCtrlr(); //debugging
+void 			printFileCtrlr();	//debugging
+int             isNONEpolicy();
+int             getLRU();
+//custom
+// pte_t * walkpgdir(pde_t *pgdir, const void *va, int alloc);
+//end custom
+
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

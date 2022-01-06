@@ -70,11 +70,16 @@ QEMU = $(shell if which qemu > /dev/null; \
 endif
 
 ifndef SELECTION
-SELECTION := NFU
+SELECTION := FIFO
 endif
 
 ifndef VERBOSE_PRINT
 VERBOSE_PRINT := FALSE
+endif
+
+
+ifndef PGSIZE
+PGSIZE := 4096
 endif
 
 CC = $(TOOLPREFIX)gcc
